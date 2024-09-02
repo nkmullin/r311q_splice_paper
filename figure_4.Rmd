@@ -1,0 +1,75 @@
+---
+title: "r311q_figs"
+author: "nate mullin"
+date: "2024-08-31"
+output: html_document
+---
+
+```{r}
+library(Seurat)
+library(tidyverse)
+library(scCustomize)
+library(ggpubr)
+library(cowplot)
+library(RColorBrewer)
+```
+
+
+```{r}
+load("/path/to/nr2e3_line_obj.RData")
+```
+
+
+```{r}
+# generate NR2E3 and NRL violin plots
+
+nr2e3 <- VlnPlot_scCustom(seurat_object = organoid_all_tp, features = "NR2E3", 
+                 group.by = "line", idents = c("Rod"),
+                 pt.size = 0, plot_median = T) & NoLegend() 
+
+nrl <- VlnPlot_scCustom(seurat_object = organoid_all_tp, features = "NRL", 
+                 group.by = "line", idents = c("Rod"),
+                 pt.size = 0, plot_median = T) & NoLegend() 
+
+pdf(file = "nr2e3_nrl_all_lines.pdf", width = 8, height = 3)
+ggarrange(nr2e3, nrl, ncol = 2, nrow = 1)
+dev.off()
+```
+
+
+```{r}
+# subset object to only rods and cones for plotting
+sub <- subset(organoid_all_tp, very_broaad_celltype %in% c("Cone", "Rod"))
+
+# calculate cell type proportions
+cell_counts <- as.data.frame(table(sub$very_broaad_celltype, sub$line))
+cell_counts <- as_tibble(cell_counts)
+cell_counts <- cell_counts %>% dplyr::rename(Celltype = Var1) %>% dplyr::rename(Line = Var2) 
+
+okabeito_pal <- c("#000000", "#E69F00", "#56B4E9", "#009E73",
+                  "#0072B2","#D55E00", "#CC79A7","#999999")
+
+cell_props <- cell_counts %>%
+              group_by(Line) %>%
+              mutate(prop = Freq/sum(Freq)*100)
+
+cell_props 
+
+# generate bar plot and print
+donor_prop_bar <- cell_props %>% ggplot(aes(fill=Celltype, y=prop, x=Line)) + 
+                      geom_bar(position=position_fill(reverse = TRUE), stat="identity") + 
+                        theme_half_open() + ggtitle(label = "D160 Organoid Composition") + 
+                      scale_fill_manual(values = okabeito_pal) + 
+                      xlab("Donor/Line") + ylab("Proportion in Sample")
+
+
+pdf("donor_prop_bar_rod_cone_only.pdf", width=8, height=3)
+donor_prop_bar
+dev.off()
+```
+
+
+
+
+
+

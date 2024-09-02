@@ -1,0 +1,164 @@
+---
+title: "cluster_anotation_19MAR2024"
+author: "Nate Mullin"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(Seurat)
+library(tidyverse)
+library(RColorBrewer)
+library(scCustomize)
+library(ggpubr)
+library(EnhancedVolcano)
+set.seed(1234)
+```
+
+#################################################################################
+###################### LOAD CCA OBJECT AND ADD METADATA #########################
+#################################################################################
+
+```{r fig.width=20, fig.height=8}
+# load the object using 25 PCA dimensions for UMAP and with stringent filtering
+load("/path/to/final_object.RData")
+
+# rename object
+organoid_all_tp <- IVR_object.combined
+rm(IVR_object.combined)
+
+# look at counts
+table(organoid_all_tp$orig.ident)
+
+# break out metadata
+
+line <- ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "B1217_D160_RO"), "B1217", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "D160_B1427"), "B1427", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "D160_B342cor"), "B342cor", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "D160_B342"), "B342", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "S13_tp_roundII_good_control"), "B1737", "error")))))
+
+nr2e3_status <- ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "B1217_D160_RO"), "mut", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "D160_B1427"), "control", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "D160_B342cor"), "control", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "D160_B342"), "mut", ifelse(
+str_detect(organoid_all_tp[["orig.ident"]][["orig.ident"]], "S13_tp_roundII_good_control"), "mut", "error")))))
+
+# add metadata
+table(line)
+organoid_all_tp[["line"]] <- line
+organoid_all_tp[["nr2e3_status"]] <- nr2e3_status
+
+# re-order factors
+organoid_all_tp$line <- factor(organoid_all_tp$line, levels = c("B1427", "B1737", "B1217", "B342", "B342cor"))
+
+# save object with metadata
+save(organoid_all_tp, file = "nr2e3_line_obj.RData")
+
+```
+
+#################################################################################
+############################### Reference Mapping ###############################
+#################################################################################
+
+load ref data set - use Sridhar et al (Reh Lab)
+```{r}
+fetal_cca_59_82cP_125cp_res1.5_Glia <- readRDS("/path/to/sridhar_data/uw_objects/fetal_cca_59_82cP_125cp_res1.5_Glia.RDS")
+
+DefaultAssay(organoid_all_tp) <- "RNA"
+DefaultAssay(fetal_cca_59_82cP_125cp_res1.5_Glia) <- "RNA"
+
+fetal_cca_59_82cP_125cp_res1.5_Glia <- UpdateSeuratObject(object = fetal_cca_59_82cP_125cp_res1.5_Glia)
+
+common.features <- intersect(rownames(organoid_all_tp), rownames(fetal_cca_59_82cP_125cp_res1.5_Glia))
+length(x = common.features)
+
+anchors <- FindTransferAnchors(reference = fetal_cca_59_82cP_125cp_res1.5_Glia, query = organoid_all_tp,
+    dims = 1:30, reference.reduction = "pca", features = common.features, reduction = "pcaproject")
+
+predictions <- TransferData(anchorset = anchors, refdata = fetal_cca_59_82cP_125cp_res1.5_Glia$type,
+    dims = 1:30)
+
+organoid_all_tp <- AddMetaData(organoid_all_tp, metadata = predictions)
+
+Idents(organoid_all_tp) <- 'predicted.id'
+
+
+# set score cutoff to 0.5
+organoid_all_tp$draft_celltype <- ifelse(organoid_all_tp$prediction.score.max > 0.5, organoid_all_tp$predicted.id, NA)
+
+Idents(organoid_all_tp) <- 'draft_celltype'
+
+save(organoid_all_tp, file = "nr2e3_line_obj.RData")
+```
+
+
+####################################################################################
+############################ REFINE CLUSTER ANNOTATION  ############################
+####################################################################################
+
+```{r fig.width=10, fig.height=10}
+# focus on photoreceptors
+Idents(organoid_all_tp) <- "draft_celltype"
+DefaultAssay(organoid_all_tp) <- "RNA"
+
+# add scaled RNA assay
+all.genes <- rownames(organoid_all_tp)
+organoid_all_tp <- ScaleData(organoid_all_tp, features = all.genes, assay = "RNA")
+
+
+# merge photo/progen with photoreceptors
+organoid_all_tp <- RenameIdents(organoid_all_tp, "Photo/Progen" = "Photoreceptors")
+
+organoid_all_tp$draft_celltype_merge_prc <- organoid_all_tp@active.ident # create new metadata column
+
+
+# look for subclusters
+Idents(organoid_all_tp) <- "draft_celltype_merge_prc"
+
+organoid_all_tp <- FindSubCluster(organoid_all_tp, cluster = c("Photoreceptors"), graph.name = "integrated_nn", algorithm = 3, resolution = 0.1)
+Idents(organoid_all_tp) <- "sub.cluster"
+
+DimPlot(organoid_all_tp, reduction = "umap", label = T, shuffle = T)+ NoLegend()
+
+
+# make a list of genes involved in rod/cone development
+photoreceptor_genes <- c("ARR3", "GUCA1C","PDE6C", "PDE6H", #CONES
+                         "GNGT1", "CNGB1", 'GNAT1', "RHO", "RPGR", "CEP290", "NRL", #RODS
+                         "RCVRN", #BOTH
+                         "ATOH7", "PRDM1", "VSX2", "CRX" ,"OTX2")
+
+# Downsample the clusters to a maximum of 100 cells each (makes the heatmap easier to see for small clusters)
+organoid_all_tp.small <- subset(organoid_all_tp, downsample = 100)
+
+DoHeatmap(organoid_all_tp.small, features = photoreceptor_genes, label = F, group.by = "sub.cluster", assay = "RNA", raster = F)
+```
+
+
+# rename PRC clusters
+```{r, fig.width=15, fig.height=5}
+levels(organoid_all_tp)
+
+new.cluster.ids <- c("AC"         ,       "Rod" , "Glia"   ,           "Bipolars"  ,        "Cone" ,
+"Early Glia"  , "Photoreceptor" , "T3"       ,         "Photoreceptor" , "Progenitors"      ,
+"HC"          , "RGC"              , "microglia",         "Photoreceptor" , "Photoreceptor" ,
+"T1/RGC"      , "T1"               , "T2/T3"    ,         "Photoreceptor", "Photoreceptor" ,
+"unk"         , "Photoreceptor" , "T2"       ,         "Photoreceptor" , "Photoreceptor" )
+
+names(new.cluster.ids) <- levels(organoid_all_tp)
+
+organoid_all_tp <- RenameIdents(organoid_all_tp, new.cluster.ids)
+organoid_all_tp$celltype <-  Idents(organoid_all_tp)
+
+levels(organoid_all_tp)
+
+DimPlot_scCustom(seurat_object = organoid_all_tp,
+    label = T, group.by = "celltype", aspect_ratio = 1) + NoLegend()
+
+DimPlot_scCustom(seurat_object = organoid_all_tp,
+    label = T, group.by = "celltype", split.by = "line", aspect_ratio = 1, pt.size = 1) & NoLegend()
+
+save(organoid_all_tp, file = "nr2e3_line_obj.RData")
+```
+
